@@ -24,13 +24,14 @@ class ProcessorResult(object):
     """The result and logs producted by a callback"""
 
     def __init__(self, result=None, follows=(), messages=(),
-                 logs=(), exception=None, extinfo={}):
+                 logs=(), exception=None, extinfo={}, save=None):
         self.result = result
         self.follows = follows
         self.messages = messages
         self.logs = logs
         self.exception = exception
         self.extinfo = extinfo
+        self.save = save
 
     def rethrow(self):
         """rethrow the exception"""
@@ -139,7 +140,6 @@ class Processor(object):
                 'taskid': task['taskid'],
                 'project': task['project'],
                 'url': task.get('url'),
-                'schedule': task.get('schedule', {}),
                 'track': {
                     'fetch': {
                         'ok': response.isok(),
@@ -162,8 +162,11 @@ class Processor(object):
                         'logs': ret.logstr()[-self.RESULT_LOGS_LIMIT:],
                         'exception': ret.exception,
                     },
+                    'save': ret.save,
                 },
             }
+            if 'schedule' in task:
+                status_pack['schedule'] = task['schedule']
 
             # FIXME: unicode_obj should used in scheduler before store to database
             # it's used here for performance.
@@ -175,18 +178,22 @@ class Processor(object):
             self.newtask_queue.put([utils.unicode_obj(newtask) for newtask in ret.follows])
 
         for project, msg, url in ret.messages:
-            self.inqueue.put(({
-                'taskid': utils.md5string(url),
-                'project': project,
-                'url': url,
-                'process': {
-                    'callback': '_on_message',
-                }
-            }, {
-                'status_code': 200,
-                'url': url,
-                'save': (task['project'], msg),
-            }))
+            try:
+                self.on_task({
+                    'taskid': utils.md5string(url),
+                    'project': project,
+                    'url': url,
+                    'process': {
+                        'callback': '_on_message',
+                    }
+                }, {
+                    'status_code': 200,
+                    'url': url,
+                    'save': (task['project'], msg),
+                })
+            except Exception as e:
+                logger.exception('Sending message error.')
+                continue
 
         if ret.exception:
             logger_func = logger.error

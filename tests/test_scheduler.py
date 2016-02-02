@@ -187,6 +187,19 @@ class TestScheduler(unittest.TestCase):
         self.assertIsNotNone(task)
         self.assertEqual(task['url'], 'data:,_on_get_info')
 
+    def test_34_new_not_used_project(self):
+        self.projectdb.insert('test_project_not_started', {
+            'name': 'test_project_not_started',
+            'group': 'group',
+            'status': 'RUNNING',
+            'script': 'import time\nprint(time.time())',
+            'comments': 'test project',
+            'rate': 1.0,
+            'burst': 10,
+        })
+        task = self.scheduler2fetcher.get(timeout=1)
+        self.assertEqual(task['taskid'], '_on_get_info')
+
     def test_35_new_task(self):
         time.sleep(0.2)
         self.newtask_queue.put({
@@ -209,9 +222,10 @@ class TestScheduler(unittest.TestCase):
         self.assertGreater(len(self.rpc.get_active_tasks()), 0)
         self.assertIsNotNone(task)
         self.assertEqual(task['project'], 'test_project')
+        self.assertIn('schedule', task)
         self.assertIn('fetch', task)
         self.assertIn('process', task)
-        self.assertNotIn('schedule', task)
+        self.assertIn('track', task)
         self.assertEqual(task['fetch']['data'], 'abc')
 
     def test_37_force_update_processing_task(self):
@@ -401,27 +415,27 @@ class TestScheduler(unittest.TestCase):
 
     def test_a30_task_verify(self):
         self.assertFalse(self.rpc.newtask({
-            #'taskid': 'taskid',
+            #'taskid': 'taskid#',
             'project': 'test_project',
             'url': 'url',
         }))
         self.assertFalse(self.rpc.newtask({
-            'taskid': 'taskid',
+            'taskid': 'taskid#',
             #'project': 'test_project',
             'url': 'url',
         }))
         self.assertFalse(self.rpc.newtask({
-            'taskid': 'taskid',
+            'taskid': 'taskid#',
             'project': 'test_project',
             #'url': 'url',
         }))
         self.assertFalse(self.rpc.newtask({
-            'taskid': 'taskid',
+            'taskid': 'taskid#',
             'project': 'not_exist_project',
             'url': 'url',
         }))
         self.assertTrue(self.rpc.newtask({
-            'taskid': 'taskid',
+            'taskid': 'taskid#',
             'project': 'test_project',
             'url': 'url',
         }))
@@ -524,7 +538,7 @@ class TestScheduler(unittest.TestCase):
             'burst': 0,
         })
         time.sleep(0.1)
-        self.assertLess(self.rpc.size(), 10)
+        pre_size = self.rpc.size()
         for i in range(20):
             self.newtask_queue.put({
                 'taskid': 'taskid%d' % i,
@@ -536,11 +550,11 @@ class TestScheduler(unittest.TestCase):
                 },
             })
         time.sleep(1)
-        self.assertEqual(self.rpc.size(), 10)
+        self.assertEqual(self.rpc.size() - pre_size, 10)
 
     def test_x20_delete_project(self):
         self.assertIsNotNone(self.projectdb.get('test_inqueue_project'))
-        self.assertIsNotNone(self.taskdb.get_task('test_inqueue_project', 'taskid1'))
+        #self.assertIsNotNone(self.taskdb.get_task('test_inqueue_project', 'taskid1'))
         self.projectdb.update('test_inqueue_project', status="STOP", group="lock,delete")
         time.sleep(1)
         self.assertIsNone(self.projectdb.get('test_inqueue_project'))

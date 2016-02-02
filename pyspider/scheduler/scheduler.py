@@ -103,13 +103,13 @@ class Scheduler(object):
             self.task_queue[project['name']].rate = project['rate']
             self.task_queue[project['name']].burst = project['burst']
 
-            # update project runtime info from processing by sending a on_get_info request,
-            # result is catched by on_request
+            # update project runtime info from processor by sending a _on_get_info
+            # request, result is in status_page.track.save
             self.on_select_task({
                 'taskid': '_on_get_info',
                 'project': project['name'],
                 'url': 'data:,_on_get_info',
-                'status': self.taskdb.ACTIVE,
+                'status': self.taskdb.SUCCESS,
                 'fetch': {
                     'save': ['min_tick', ],
                 },
@@ -208,7 +208,14 @@ class Scheduler(object):
         try:
             while True:
                 task = self.status_queue.get_nowait()
-                if not self.task_verify(task):
+                # check _on_get_info result here
+                if task.get('taskid') == '_on_get_info' and 'project' in task and 'track' in task:
+                    self.projects[task['project']].update(task['track'].get('save') or {})
+                    logger.info(
+                        '%s on_get_info %r', task['project'], task['track'].get('save', {})
+                    )
+                    continue
+                elif not self.task_verify(task):
                     continue
                 self.on_task_status(task)
                 cnt += 1
@@ -220,35 +227,20 @@ class Scheduler(object):
 
     def _check_request(self):
         '''Check new task queue'''
-        cnt = 0
-        while cnt < self.LOOP_LIMIT:
+        tasks = {}
+        while len(tasks) < self.LOOP_LIMIT:
             try:
                 task = self.newtask_queue.get_nowait()
             except Queue.Empty:
-                return cnt
+                break
 
             if isinstance(task, list):
-                tasks = task
+                _tasks = task
             else:
-                tasks = (task, )
+                _tasks = (task, )
 
-            for task in tasks:
+            for task in _tasks:
                 if not self.task_verify(task):
-                    continue
-
-                # check _on_get_info result here
-                if task['url'] == 'data:,on_get_info':
-                    self.projects[task['project']].update(task['fetch'].get('save', {}))
-                    logger.info(
-                        '%s on_get_info %r', task['project'], task['fetch'].get('save', {})
-                    )
-                    continue
-
-                if (
-                        self.INQUEUE_LIMIT
-                        and len(self.task_queue[task['project']]) >= self.INQUEUE_LIMIT
-                ):
-                    logger.debug('overflow task %(project)s:%(taskid)s %(url)s', task)
                     continue
 
                 if task['taskid'] in self.task_queue[task['project']]:
@@ -256,14 +248,25 @@ class Scheduler(object):
                         logger.debug('ignore newtask %(project)s:%(taskid)s %(url)s', task)
                         continue
 
-                oldtask = self.taskdb.get_task(task['project'], task['taskid'],
-                                               fields=self.merge_task_fields)
-                if oldtask:
-                    task = self.on_old_request(task, oldtask)
-                else:
-                    task = self.on_new_request(task)
-                cnt += 1
-        return cnt
+                if task['taskid'] in tasks:
+                    if not task.get('schedule', {}).get('force_update', False):
+                        continue
+
+                tasks[task['taskid']] = task
+
+        for task in itervalues(tasks):
+            if self.INQUEUE_LIMIT and len(self.task_queue[task['project']]) >= self.INQUEUE_LIMIT:
+                logger.debug('overflow task %(project)s:%(taskid)s %(url)s', task)
+                continue
+
+            oldtask = self.taskdb.get_task(task['project'], task['taskid'],
+                                           fields=self.merge_task_fields)
+            if oldtask:
+                task = self.on_old_request(task, oldtask)
+            else:
+                task = self.on_new_request(task)
+
+        return len(tasks)
 
     def _check_cronjob(self):
         """Check projects cronjob tick, return True when a new tick is sended"""
@@ -300,6 +303,7 @@ class Scheduler(object):
         'project',
         'url',
         'status',
+        'schedule',
         'fetch',
         'process',
         'track',
@@ -317,25 +321,38 @@ class Scheduler(object):
                 self._send_buffer.append(_task)
                 break
 
+        if self.out_queue.full():
+            return {}
+
+        taskids = []
+        cnt = 0
         cnt_dict = dict()
+        limit = self.LOOP_LIMIT
         for project, task_queue in iteritems(self.task_queue):
+            if cnt >= limit:
+                break
+
             # task queue
             self.task_queue[project].check_update()
-            cnt = 0
+            project_cnt = 0
 
             # check send_buffer here. when not empty, out_queue may blocked. Not sending tasks
-            while cnt < self.LOOP_LIMIT / 10 and not self._send_buffer:
+            while cnt < limit and project_cnt < limit / 10:
                 taskid = task_queue.get()
                 if not taskid:
                     break
-                task = self.taskdb.get_task(project, taskid, fields=self.request_task_fields)
-                if not task:
-                    continue
 
-                # inform processor project may updated
-                task = self.on_select_task(task)
+                taskids.append((project, taskid))
+                project_cnt += 1
                 cnt += 1
-            cnt_dict[project] = cnt
+            cnt_dict[project] = project_cnt
+
+        for project, taskid in taskids:
+            task = self.taskdb.get_task(project, taskid, fields=self.request_task_fields)
+            if not task:
+                continue
+            task = self.on_select_task(task)
+
         return cnt_dict
 
     def _print_counter_log(self):
@@ -524,7 +541,7 @@ class Scheduler(object):
             result = []
 
             while len(result) < limit and tasks and not all(x is None for x in tasks):
-                updatetime, task = t = max(tasks)
+                updatetime, task = t = max(t for t in tasks if t)
                 i = tasks.index(t)
                 tasks[i] = next(iters[i], None)
                 for key in list(task):
